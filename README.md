@@ -12,10 +12,8 @@ This client covers the full v1 API:
 
 ## Install
 
-Not on PyPI yet. Install from GitHub for now; the PyPI release is coming.
-
 ```bash
-pip install "git+https://github.com/elastly/elastly-python.git@v0.1.0"
+pip install elastly
 ```
 
 Requires Python 3.9 or newer.
