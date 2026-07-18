@@ -61,6 +61,53 @@ Every response line is either a priced result (`ok` is true) or a per-line error
 
 `POST /v1/prices` requires an `Idempotency-Key` header. Use a fresh key for each logical request and reuse the same key on retries. A replay returns the stored response, so a retried call never prices twice.
 
+## Price with a deadline and a fallback
+
+If you price inside a checkout or quote flow, use the serving layer instead of calling the API directly. It puts a hard deadline on the call (800ms by default), retries transient failures with backoff, trips a circuit breaker when Elastly is down (5 failures, 30 second cooldown), and falls back to a price you supply instead of blocking your flow.
+
+```python
+import elastly
+from elastly.serving import FallbackPrice, PricesNamespace, static_fallback
+from elastly.transport import ElastlyTransport
+
+configuration = elastly.Configuration(access_token="elastly_live_...")
+client = elastly.ApiClient(configuration)
+prices = PricesNamespace(ElastlyTransport(client))
+
+result = prices.get(
+    elastly.PricesRequestLinesInner(product_sku="SKU-1042", quantity=25),
+    fail_open=static_fallback(lambda line, cause: FallbackPrice(price_cents=1500)),
+)
+
+if result.source == "elastly":
+    print(result.price_cents, result.reason_summary)
+elif result.source == "fallback":
+    print(result.price_cents, "fallback because", result.cause.reason)
+else:
+    print("no price available:", result.cause.reason)
+```
+
+Every result carries a `source`: `"elastly"` (a real price), `"fallback"` (your resolver's price), or `"unavailable"` (your resolver returned `None`). Mistakes on your side, like an invalid request or a bad key, always raise a typed error from `elastly.errors` instead of falling back. Prefer an exception over a fallback price? Pass `fail_open=throw_on_failure()`.
+
+The transport handles retries and idempotency keys for you, so you do not need to manage the `Idempotency-Key` header yourself on this path.
+
+## Verify webhooks
+
+Verify the `elastly-signature` header on every webhook before trusting the payload:
+
+```python
+from elastly.webhooks import SignatureVerificationError, WebhooksNamespace
+
+webhooks = WebhooksNamespace()
+try:
+    event = webhooks.verify(raw_body, signature_header, "whsec_...")
+except SignatureVerificationError:
+    ...  # reject with a 400
+print(event.event, event.data)
+```
+
+`verify` checks the HMAC signature in constant time, rejects replays older than 5 minutes, and returns a typed event.
+
 ## Close the loop
 
 Elastly learns from the difference between the price it recommended and the price your team actually charged. When you ingest quotes, echo the `pricingDecisionId` you received from the prices call on the matching quote line. Skip that and the engine has nothing to learn from.
